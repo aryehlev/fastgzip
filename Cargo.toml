@@ -1,0 +1,27 @@
+[package]
+name = "fastgzip"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+description = "Fast gzip for streams of small, similar payloads: shared Huffman codes, one pass"
+license = "MIT"
+keywords = ["gzip", "deflate", "compression"]
+categories = ["compression"]
+
+[dependencies]
+crc32fast = "1.5"
+
+[dev-dependencies]
+flate2 = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# `cargo test --profile checked`, `cargo run --profile checked --example stress`:
+# optimized, with every assertion on.  The encoder reads and writes through
+# raw pointers; each such access has a debug assertion on its bounds.
+[profile.checked]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+
+[profile.release]
+debug = 1
