@@ -7,7 +7,7 @@
 //! fastgzip::gzip_with(&payload, |gz| body.extend_from_slice(gz));
 //! ```
 //!
-//! or keep a compressor of your own, for instance one per recipient:
+//! or keep a compressor of your own, for instance one per kind of payload:
 //!
 //! ```
 //! let mut gz = fastgzip::Gzip::new();

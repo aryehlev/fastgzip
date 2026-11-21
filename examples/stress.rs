@@ -10,7 +10,7 @@
 mod gen;
 
 use flate2::read::MultiGzDecoder;
-use gen::{any_payload, bid_request, Rng};
+use gen::{any_payload, request, Rng};
 use std::io::{Read, Write};
 
 fn main() {
@@ -35,17 +35,17 @@ fn main() {
         let data = match phase {
             0 | 1 => {
                 let size = 300 + rng.below(6000);
-                bid_request(&mut rng, size, phase)
+                request(&mut rng, size, phase)
             }
             2 => {
                 let kind = rng.below(4);
                 let size = 200 + rng.below(9000);
-                bid_request(&mut rng, size, kind)
+                request(&mut rng, size, kind)
             }
             3 => {
                 // requests with a stretch of something else inside
                 let size = 1000 + rng.below(5000);
-                let mut d = bid_request(&mut rng, size, 0);
+                let mut d = request(&mut rng, size, 0);
                 let other = any_payload(&mut rng, 600);
                 let at = rng.below(d.len());
                 d.splice(at..at, other);

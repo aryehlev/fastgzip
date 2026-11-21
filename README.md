@@ -18,40 +18,32 @@ let mut gz = fastgzip::Gzip::new();
 let bytes: &[u8] = gz.compress(&payload); // valid until the next call
 ```
 
-It is the fast mode of gzlocal 0.4 written again in Rust, with every part
-looked at for what it costs: `fastgzip::gzip_with` takes the place of
-`gzlocal::gzip_fast_with`. It came out faster than the C version, and unlike
-it, it stays fast for payloads over 16 KiB.
-
 ## What it costs
 
 Microseconds per call inside tokio (2 workers), on a GitHub arm64 runner
-(Neoverse N2). "Other work" is memory the worker thread walks between two
-calls, which is what decides how much of the compressor is still in the
-caches when the next payload arrives.
+(Neoverse N2), next to libdeflate at level 1. "Other work" is memory the
+worker thread walks between two calls, which is what decides how much of the
+compressor is still in the caches when the next payload arrives.
 
-| payloads | other work | stock libdeflate, level 1 | gzlocal 0.4 `gzip_fast_with` (C) | fastgzip | fastgzip's share of stock's time |
-|---|---|---|---|---|---|
-| synthetic bid requests, 3.7 KB | none | 17.34 | 5.57 | **5.17** | 29.8% |
-| | 4 MiB | 18.11 | 6.16 | **5.46** | 30.1% |
-| | 64 MiB | 20.11 | 7.23 | **6.47** | 32.2% |
-| requests of one exchange (a published capture), 1.8 KB | none | 9.54 | 2.59 | **2.47** | 25.9% |
-| | 4 MiB | 10.47 | 3.14 | **2.73** | 26.1% |
-| | 64 MiB | 12.28 | 4.00 | **3.42** | 27.9% |
-| six synthetic requests in an array, 22 KB | none | 78.47 | 84.27 | **27.31** | 34.8% |
-| | 4 MiB | 79.61 | 85.95 | **27.73** | 34.8% |
-| | 64 MiB | 81.34 | 88.10 | **29.26** | 36.0% |
+| payloads | other work | libdeflate, level 1 | fastgzip | fastgzip's share of libdeflate's time |
+|---|---|---|---|---|
+| synthetic JSON requests, 3.7 KB | none | 17.34 | **5.17** | 29.8% |
+| | 4 MiB | 18.11 | **5.46** | 30.1% |
+| | 64 MiB | 20.11 | **6.47** | 32.2% |
+| real JSON requests of one kind, 1.8 KB, 62% of each a base64 field | none | 9.54 | **2.47** | 25.9% |
+| | 4 MiB | 10.47 | **2.73** | 26.1% |
+| | 64 MiB | 12.28 | **3.42** | 27.9% |
+| six of the synthetic requests in an array, 22 KB | none | 78.47 | **27.31** | 34.8% |
+| | 4 MiB | 79.61 | **27.73** | 34.8% |
+| | 64 MiB | 81.34 | **29.26** | 36.0% |
 
-The output is 2.1%, 3.0% and 1.2% larger than stock libdeflate's for these
-three kinds; see Output size for others.
+The output is 2.1%, 3.0% and 1.2% larger than libdeflate's for these three
+kinds; see Output size for others.
 
-On the x86-64 runner of the same run (AMD EPYC 9V74) the 3.7 KB requests
-take 17.81 / 18.99 / 30.00 with stock libdeflate, 5.81 / 6.25 / 10.55 with
-the C version and 5.51 / 5.86 / 9.42 with fastgzip.
+On an x86-64 runner (AMD EPYC 9V74) the 3.7 KB requests take 17.81 / 18.99 /
+30.00 with libdeflate and 5.51 / 5.86 / 9.42 with fastgzip.
 
-Each figure is the lowest median of five runs. The scripts and their output
-are in the branch `gzlocal-arm-bench` of `aryehlev/TheOptimizer`
-(`exp/rust/run.sh`, `results/rust-*/rust.txt`).
+Each figure is the lowest median of five runs.
 
 Your payloads will differ. `cargo run --release --example payloads --
 requests.jsonl` runs a file of them (one per line) through one compressor and
@@ -62,12 +54,12 @@ between.
 ## Using it well
 
 **One compressor per kind of payload.** Consecutive payloads of one `Gzip`
-share their Huffman codes. Requests to different recipients that are all
-OpenRTB JSON are one kind as far as that goes (one of the sets under Output
-size is 70 sample requests of different exchanges on one compressor).
-Payloads as different as JSON and protobuf would not be: give each its own
-`Gzip`. `gzip_with` uses one compressor per thread for everything it is
-given.
+share their Huffman codes. Requests of one protocol are one kind as far as
+that goes, also when they come from different senders with their own
+dialects (one of the sets under Output size is 70 such requests on one
+compressor). Payloads as different as JSON and protobuf would not be: give
+each its own `Gzip`. `gzip_with` uses one compressor per thread for
+everything it is given.
 
 **Look at `stats()` once.** `Gzip::stats()` (and `local_stats()` for the
 thread-local one) says how the blocks were written. In steady state nearly
@@ -126,9 +118,9 @@ comparison.
 - The table is zeroed at the start of every payload. That is cheap at this
   size, and it matters when the thread has done other work since its last
   payload: zeroing walks the table front to back, which the hardware fetches
-  far faster than the scattered first touches of the lookups. gzlocal 0.3
-  kept its table between calls to save the clearing, and lost more than it
-  saved as soon as the caches were cold.
+  far faster than the scattered first touches of the lookups. Keeping the
+  table from call to call instead, to save the clearing, loses more than it
+  saves as soon as the caches are cold.
 - A position is an offset into the payload, so an empty entry reads as
   position 0. The bytes there are compared like any other candidate's. No
   entry is tested for being empty, and the only branch in a step is the one
@@ -179,8 +171,8 @@ comparison.
 
 - Codes are remade after the 1st, 2nd, 6th, 14th ... payload and then every
   1024 payloads. Early on new codes pay at once. Later they change little:
-  making them every 64 payloads and counting one payload in eight, as gzlocal
-  0.4 does, cost 4 to 8% more time on the N2 runner for no gain in size.
+  making them every 64 payloads and counting one payload in eight cost 4 to
+  8% more time on the N2 runner for no gain in size.
 - Between two makings, about 32 payloads have their symbols counted while
   they are written (one extra increment per symbol; 15 to 25% on those
   payloads). The counts go into the next codes, and they say whether the
@@ -203,8 +195,7 @@ recent payloads.
 **Payloads over 16 KiB** (`large`, `chunk`) are done 16 KiB at a time, each
 piece searching the piece before it as well (between pieces the table's
 positions are moved down, with vector instructions), and all pieces that can
-be written in one pass form a single DEFLATE block with one header. gzlocal
-0.4 hands such payloads to stock libdeflate.
+be written in one pass form a single DEFLATE block with one header.
 
 **Making codes** (`huff.rs`, `codes.rs`) is the one slow thing left: 3 to 5
 microseconds on x86-64, about what a payload takes. It runs once per 1024
@@ -226,10 +217,11 @@ is:
 
 - **Looking up only every other position** after 16 bytes without a match
   (measured on x86-64): 4% faster on the synthetic requests and 15% on the
-  capture, for 1.8% and 1.2% more output. Not taken: it buys time with size.
+  ones that are mostly base64, for 1.8% and 1.2% more output. Not taken: it
+  buys time with size.
 - **Entering the last two positions of a match** into the table instead of
-  the last one: 1% slower; output 0.1% smaller on bid requests, 0.6% larger on
-  very repetitive JSON.
+  the last one: 1% slower; output 0.1% smaller on the synthetic requests,
+  0.6% larger on very repetitive JSON.
 - **A 4 KiB table** for payloads of 1 to 2 KiB instead of 8 KiB: the same
   time, with cold caches too, and 0.1% more output.
 - **Hashing a position when it is looked up**, not one step ahead, which is
@@ -249,22 +241,23 @@ is:
 
 ## Output size
 
-Against stock libdeflate at level 1, each set through one compressor:
+Against libdeflate at level 1, each set through one compressor:
 
-| payloads | size | stock's output | fastgzip's is larger by |
+| payloads | size | libdeflate's output | fastgzip's is larger by |
 |---|---|---|---|
-| synthetic bid requests | 3.7 KB | 58.1% of the input | 2.1% |
-| requests of one exchange (published capture; 62% of each is a base64 blob) | 1.8 KB | 75.0% | 3.0% |
-| 70 sample requests of many exchanges, shuffled | 1.5 KB | 58.2% | 4.9% |
-| the same with Prebid Server's test fixtures (192) | 1.4 KB | 52.2% | 8.3% |
+| synthetic JSON requests | 3.7 KB | 58.1% of the input | 2.1% |
+| real JSON requests of one kind, 62% of each a base64 field | 1.8 KB | 75.0% | 3.0% |
+| 70 sample requests of one protocol from many senders, shuffled | 1.5 KB | 58.2% | 4.9% |
+| 192 such requests, more varied still | 1.4 KB | 52.2% | 8.3% |
 | three, six, twelve synthetic requests in an array | 11, 22, 45 KB | 44.7%, 39.9%, 36.9% | 1.4%, 1.2%, 1.7% |
 | the last 900, 500, 300 bytes of the synthetic requests | | 73.3%, 71.7%, 82.8% | 3.4%, 5.9%, 7.5% |
 | Twitter API JSON cut into pieces | 5 KB | 33.7% | 6.2% |
 | a very repetitive JSON file (citm_catalog) cut into pieces | 8 KB | 6.6% | 14% |
 
 Where the difference comes from: the codes are made for the payloads before
-this one, not for this one (about half of it on bid requests), and the search
-keeps one candidate per hash where libdeflate keeps two (the other half).
+this one, not for this one (about half of it on the synthetic requests), and
+the search keeps one candidate per hash where libdeflate keeps two (the other
+half).
 
 It grows when one compressor is given payloads of several kinds, when the
 payloads are small (the header of the shared codes, about 70 bytes, goes out
@@ -286,15 +279,17 @@ an optimized build.
   with this crate) of every shape of payload: empty, tiny, one byte
   repeated, noise, text with every byte value, requests of several kinds in
   turn, payloads of up to 1 MiB, and each edge between two blocks.
-- **Stress** (`examples/stress.rs`): 200,000 payloads, 1.1 GB, through
-  long-lived compressors in the `checked` build, on each of arm64 (Neoverse
-  N2) and x86-64; another 800,000 on x86-64. Every output decoded and
-  compared.
+- **Stress** (`examples/stress.rs`): over a million payloads through
+  long-lived compressors in the `checked` build, 200,000 of them on arm64
+  (Neoverse N2), every output decoded and compared.
 - **Other decoders**: 50,000 of those outputs read back by zlib 1.3 on the
   runners (zlib-ng 1.3.1 on the build machine), and 1,500 by GNU gzip 1.12.
 - **Miri**: the unit tests and a test that takes every path once, on both
   architectures. Nothing reported.
 - **Rust 1.83** builds the library.
+
+The workflow in `.github/workflows/ci.yml` repeats all of this at every push,
+with a stress run of 50,000 payloads, on x86-64 and on arm64.
 
 Not tested: big-endian targets (the code is written for them, with explicit
 byte orders, but nothing ran it there).

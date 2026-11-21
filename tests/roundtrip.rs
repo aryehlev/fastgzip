@@ -1,7 +1,7 @@
 mod gen;
 
 use flate2::read::MultiGzDecoder;
-use gen::{any_payload, bid_request, Rng};
+use gen::{any_payload, request, Rng};
 use fastgzip::Gzip;
 use std::io::Read;
 
@@ -39,7 +39,7 @@ fn requests_share_codes() {
     let mut total = 0;
     for _ in 0..600 {
         let size = 1500 + rng.below(4000);
-        total += check(&mut gz, &bid_request(&mut rng, size, 0));
+        total += check(&mut gz, &request(&mut rng, size, 0));
     }
     let s = gz.stats();
     assert!(s.one_pass >= 590, "{s:?}");
@@ -57,14 +57,14 @@ fn a_change_of_payloads() {
     let mut gz = Gzip::new();
     for round in 0..6 {
         for _ in 0..40 {
-            check(&mut gz, &bid_request(&mut rng, 3000, round));
+            check(&mut gz, &request(&mut rng, 3000, round));
         }
         let binary: Vec<u8> = (0..3000).map(|_| 0x80 | rng.u32() as u8).collect();
         check(&mut gz, &binary); // seven bits of eight: codes of its own
         let noise: Vec<u8> = (0..3000).map(|_| rng.u32() as u8).collect();
         check(&mut gz, &noise); // nothing to gain: stored
         check(&mut gz, &vec![0u8; 5000]);
-        let mut mixed = bid_request(&mut rng, 3000, round);
+        let mut mixed = request(&mut rng, 3000, round);
         mixed[1500] = 0xfe; // one byte the codes have never seen
         check(&mut gz, &mixed);
     }
@@ -94,7 +94,7 @@ fn large_payloads() {
     for &n in &[16383usize, 16384, 16385, 32768, 32769, 49152, 100_000, 1 << 20] {
         let mut data = Vec::with_capacity(n + 6000);
         while data.len() < n {
-            data.extend_from_slice(&bid_request(&mut rng, 4000, 0));
+            data.extend_from_slice(&request(&mut rng, 4000, 0));
         }
         data.truncate(n);
         let size = check(&mut gz, &data);
@@ -128,7 +128,7 @@ fn block_edges() {
 fn thread_local() {
     let mut rng = Rng(6);
     for _ in 0..50 {
-        let data = bid_request(&mut rng, 4000, 0);
+        let data = request(&mut rng, 4000, 0);
         let back = fastgzip::gzip_with(&data, |gz| {
             let mut back = Vec::new();
             MultiGzDecoder::new(gz).read_to_end(&mut back).unwrap();
@@ -152,12 +152,12 @@ fn every_path_once() {
     let mut rng = Rng(7);
     let mut gz = Gzip::new();
     for _ in 0..18 {
-        check(&mut gz, &bid_request(&mut rng, 1300, 0)); // one pass, some counted
+        check(&mut gz, &request(&mut rng, 1300, 0)); // one pass, some counted
     }
-    let mut odd = bid_request(&mut rng, 1300, 0);
+    let mut odd = request(&mut rng, 1300, 0);
     odd[700] = 0xf3;
     check(&mut gz, &odd); // a byte without a codeword
-    check(&mut gz, &bid_request(&mut rng, 1300, 0));
+    check(&mut gz, &request(&mut rng, 1300, 0));
     let noise: Vec<u8> = (0..1200).map(|_| rng.u32() as u8).collect();
     check(&mut gz, &noise); // stored
     let binary: Vec<u8> = (0..1200).map(|_| 0x80 | rng.u32() as u8 & 0x1f).collect();
@@ -175,7 +175,7 @@ fn every_path_once() {
     for _ in 0..9 {
         long.clear();
         while long.len() < 19_000 {
-            long.extend_from_slice(&bid_request(&mut rng, 1300, 0));
+            long.extend_from_slice(&request(&mut rng, 1300, 0));
         }
         check(&mut gz, &long);
     }
@@ -198,7 +198,7 @@ fn large_payload_paths() {
     let request = |rng: &mut Rng, n: usize| {
         let mut v = Vec::with_capacity(n + 6000);
         while v.len() < n {
-            v.extend_from_slice(&bid_request(rng, 3000, 0));
+            v.extend_from_slice(&request(rng, 3000, 0));
         }
         v.truncate(n);
         v

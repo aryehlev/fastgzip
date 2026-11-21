@@ -27,19 +27,20 @@ const UAS: &[&str] = &[
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 ];
-const CATS: &[&str] = &["IAB1", "IAB2-3", "IAB9-30", "IAB12", "IAB17-44", "IAB19"];
+const TAGS: &[&str] = &["T1", "T2-3", "T9-30", "T12", "T17-44", "T19"];
 const GEO: &[&str] = &["USA", "DEU", "GBR", "FRA", "ISR", "BRA", "IND"];
 
-/// Something shaped like an OpenRTB bid request, of about `size` bytes.
-/// `kind` changes the vocabulary, as a different exchange would.
-pub fn bid_request(rng: &mut Rng, size: usize, kind: usize) -> Vec<u8> {
+/// A JSON request of about `size` bytes, the way an API with nested objects,
+/// identifiers and opaque tokens gets them.  `kind` changes the vocabulary,
+/// as another sender's dialect would.
+pub fn request(rng: &mut Rng, size: usize, kind: usize) -> Vec<u8> {
     let k = ["", "x_", "pub", "zz"][kind % 4];
     let mut v = Vec::with_capacity(size + 512);
     v.extend_from_slice(format!("{{\"{k}id\":\"").as_bytes());
     rng.hex(&mut v, 32);
-    v.extend_from_slice(b"\",\"at\":1,\"tmax\":");
+    v.extend_from_slice(b"\",\"ver\":1,\"timeout\":");
     v.extend_from_slice(format!("{}", 80 + rng.below(200)).as_bytes());
-    v.extend_from_slice(b",\"cur\":[\"USD\"],\"imp\":[");
+    v.extend_from_slice(b",\"currency\":[\"USD\"],\"items\":[");
     let mut first = true;
     while v.len() + 700 < size || first {
         if !first {
@@ -49,7 +50,7 @@ pub fn bid_request(rng: &mut Rng, size: usize, kind: usize) -> Vec<u8> {
         let (w, h) = [(300, 250), (728, 90), (320, 50), (160, 600)][rng.below(4)];
         v.extend_from_slice(
             format!(
-                "{{\"{k}id\":\"{}\",\"tagid\":\"slot-{}\",\"secure\":1,\"bidfloor\":{}.{:02},\"bidfloorcur\":\"USD\",\"banner\":{{\"w\":{w},\"h\":{h},\"pos\":{},\"format\":[{{\"w\":{w},\"h\":{h}}},{{\"w\":{},\"h\":{}}}],\"battr\":[{},{}],\"api\":[3,5,7]}},\"ext\":{{\"{k}gpid\":\"/{}/{}/home\",\"data\":{{\"pbadslot\":\"/{}/top\"}}}}}}",
+                "{{\"{k}id\":\"{}\",\"label\":\"slot-{}\",\"secure\":1,\"price\":{}.{:02},\"pricecur\":\"USD\",\"box\":{{\"w\":{w},\"h\":{h},\"pos\":{},\"sizes\":[{{\"w\":{w},\"h\":{h}}},{{\"w\":{},\"h\":{}}}],\"flags\":[{},{}],\"api\":[3,5,7]}},\"ext\":{{\"{k}path\":\"/{}/{}/home\",\"data\":{{\"section\":\"/{}/top\"}}}}}}",
                 rng.below(9) + 1,
                 rng.below(5000),
                 rng.below(3),
@@ -69,14 +70,14 @@ pub fn bid_request(rng: &mut Rng, size: usize, kind: usize) -> Vec<u8> {
     let site = rng.pick(SITES);
     v.extend_from_slice(
         format!(
-            "],\"site\":{{\"id\":\"{}\",\"domain\":\"{site}\",\"page\":\"https://{site}/{}/{}-{}.html?utm_source=feed&ref={}\",\"cat\":[\"{}\",\"{}\"],\"publisher\":{{\"id\":\"{}\"}}}},\"device\":{{\"ua\":\"{}\",\"ip\":\"{}.{}.{}.{}\",\"geo\":{{\"country\":\"{}\",\"lat\":{}.{:04},\"lon\":{}.{:04},\"type\":2}},\"devicetype\":{},\"os\":\"{}\",\"language\":\"en\",\"ifa\":\"",
+            "],\"site\":{{\"id\":\"{}\",\"domain\":\"{site}\",\"page\":\"https://{site}/{}/{}-{}.html?utm_source=feed&ref={}\",\"tags\":[\"{}\",\"{}\"],\"owner\":{{\"id\":\"{}\"}}}},\"device\":{{\"ua\":\"{}\",\"ip\":\"{}.{}.{}.{}\",\"geo\":{{\"country\":\"{}\",\"lat\":{}.{:04},\"lon\":{}.{:04},\"type\":2}},\"devicetype\":{},\"os\":\"{}\",\"language\":\"en\",\"uuid\":\"",
             rng.below(100000),
             rng.pick(&["world", "sport", "tech", "money"]),
             rng.pick(&["article", "story", "live"]),
             rng.below(1000000),
             rng.below(100000),
-            rng.pick(CATS),
-            rng.pick(CATS),
+            rng.pick(TAGS),
+            rng.pick(TAGS),
             rng.below(10000),
             rng.pick(UAS),
             rng.below(223) + 1,
@@ -100,15 +101,15 @@ pub fn bid_request(rng: &mut Rng, size: usize, kind: usize) -> Vec<u8> {
     rng.hex(&mut v, 12);
     v.extend_from_slice(b"\"},\"user\":{\"id\":\"");
     rng.hex(&mut v, 24);
-    v.extend_from_slice(b"\",\"buyeruid\":\"");
+    v.extend_from_slice(b"\",\"extid\":\"");
     rng.hex(&mut v, 36);
-    v.extend_from_slice(b"\",\"ext\":{\"consent\":\"");
+    v.extend_from_slice(b"\",\"ext\":{\"token\":\"");
     for _ in 0..60 + rng.below(80) {
         v.push(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[rng.below(64)]);
     }
-    v.extend_from_slice(b"\"}},\"regs\":{\"ext\":{\"gdpr\":1}},\"source\":{\"tid\":\"");
+    v.extend_from_slice(b"\"}},\"opts\":{\"ext\":{\"strict\":1}},\"trace\":{\"id\":\"");
     rng.hex(&mut v, 32);
-    v.extend_from_slice(b"\",\"fd\":1}}");
+    v.extend_from_slice(b"\",\"n\":1}}");
     v
 }
 
@@ -181,7 +182,7 @@ pub fn any_payload(rng: &mut Rng, max: usize) -> Vec<u8> {
         }
         _ => {
             let kind = rng.below(4);
-            v = bid_request(rng, n, kind);
+            v = request(rng, n, kind);
             v.truncate(n.max(1));
         }
     }
