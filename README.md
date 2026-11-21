@@ -1,5 +1,7 @@
 # fastgzip
 
+[![CI](https://github.com/aryehlev/fastgzip/actions/workflows/ci.yml/badge.svg)](https://github.com/aryehlev/fastgzip/actions/workflows/ci.yml)
+
 gzip for a stream of small, similar payloads (JSON requests of a few
 kilobytes) on a hot path. Pure Rust: no C, no build script, one dependency
 (`crc32fast`). The output is ordinary gzip.

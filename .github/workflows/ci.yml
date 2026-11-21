@@ -1,0 +1,59 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  # The tests and a stress run on both architectures the crate is meant for.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          command -v cargo || { curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"; }
+      - name: Tests, debug build
+        run: cargo test
+      - name: Tests, optimized build with every assertion on
+        run: cargo test --profile checked
+      - name: Stress run, every output decoded by flate2
+        run: cargo run --profile checked --example stress -- 1 50000 dump.bin
+      - name: The same outputs read back by zlib and gzip
+        run: python3 -I tools/check_dump.py dump.bin --gzip 1000
+  # The encoder reads and writes through raw pointers: Miri checks the unit
+  # tests and a test that takes every path once.
+  miri:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Miri
+        run: |
+          command -v rustup || { curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; export PATH="$HOME/.cargo/bin:$PATH"; }
+          rustup toolchain install nightly --profile minimal --component miri
+          cargo +nightly miri test
+  # The oldest Rust the library is promised to build with.  Through a crate
+  # that depends on it, so that only the library's own dependencies count.
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: The library with Rust 1.83
+        run: |
+          rustup toolchain install 1.83.0 --profile minimal
+          mkdir "$RUNNER_TEMP/msrv" && cd "$RUNNER_TEMP/msrv"
+          cargo +1.83.0 init --lib --edition 2021 --name msrv_check .
+          printf 'fastgzip = { path = "%s" }\n' "$GITHUB_WORKSPACE" >> Cargo.toml
+          cargo +1.83.0 build

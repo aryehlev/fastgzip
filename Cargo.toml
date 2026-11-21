@@ -5,6 +5,8 @@ edition = "2021"
 rust-version = "1.83"
 description = "Fast gzip for streams of small, similar payloads: shared Huffman codes, one pass"
 license = "MIT"
+repository = "https://github.com/aryehlev/fastgzip"
+readme = "README.md"
 keywords = ["gzip", "deflate", "compression"]
 categories = ["compression"]
 
