@@ -27,13 +27,25 @@
 //! depends on what the compressor was given before.  Use one compressor per
 //! kind of payload: codes made for one kind fit another poorly, and a payload
 //! they do not fit is written the slow way.
+//!
+//! That is level 0, the level this crate is for.  [`Gzip::with_level`] also
+//! has levels 1 to 9.  They search a payload the way libdeflate does at the
+//! same level and give it codes of its own, so their output is as large as
+//! libdeflate's and depends on nothing but the payload.  It takes less time
+//! to make than libdeflate's, but several times as long as level 0's: at
+//! those levels the time goes into the search, which sharing codes does
+//! nothing for.
 
 #![warn(missing_docs)]
 
 mod codes;
 mod enc;
+mod fast;
 mod huff;
+mod big;
+mod levels;
 mod tables;
+mod write;
 
 use codes::{Codes, FIXED};
 use enc::{align, append_bits, emit_seqs, scan, scratch, stored, Freq, Place, Seq, Tab, CHUNK, MAX_SEQS};
@@ -109,12 +121,26 @@ struct State {
 
 /// A gzip compressor for payloads of one kind.
 ///
-/// It owns its working memory (about 80 KiB) and its output buffer, and
-/// allocates nothing per call once the buffer has grown to fit.  It is
-/// `Send`, so it can live in a `thread_local!`, in a pool, or in a task.
+/// It owns its working memory and its output buffer, and allocates nothing
+/// per call once the buffer has grown to fit.  The working memory is about
+/// 80 KiB at level 0.  At levels 1 to 9 it is 256 KiB of tables, of which
+/// only what the payloads need is ever touched: 56 KiB for payloads of up to
+/// 4 KiB (32 KiB at level 1), twice that for up to 8 KiB, and so on.  A
+/// payload of more than 32 KiB uses the tables in full, and at levels 4 to 9
+/// another 256 KiB that is allocated when the first such payload comes.
+/// These levels also keep the matches of a block, 8 bytes for every three
+/// bytes of payload up to 400 KiB (64 KiB at level 1).  A `Gzip` is `Send`,
+/// so it can live in a `thread_local!`, in a pool, or in a task.
 pub struct Gzip {
-    st: Box<State>,
+    kind: Kind,
     out: Vec<u8>,
+}
+
+enum Kind {
+    /// Level 0: consecutive payloads share their codes.
+    Shared(Box<State>),
+    /// Levels 1 to 9: each payload on its own.
+    Level(u8, Box<levels::Levels>),
 }
 
 impl Default for Gzip {
@@ -124,8 +150,9 @@ impl Default for Gzip {
 }
 
 impl Gzip {
-    /// A new compressor.  Its first payload costs about as much as with a
-    /// general compressor; the ones after it take the fast path.
+    /// A new compressor of level 0, the fastest.  Its first payload costs
+    /// about as much as with a general compressor; the ones after it take
+    /// the fast path.
     pub fn new() -> Self {
         // Zeroed where it is allocated, not built on the stack and moved.
         // SAFETY: the layout is State's and not of size zero; every field of
@@ -141,14 +168,75 @@ impl Gzip {
         };
         st.period = 1;
         st.miss_limit = 3;
-        Gzip { st, out: Vec::new() }
+        Gzip { kind: Kind::Shared(st), out: Vec::new() }
+    }
+
+    /// A new compressor of the given level, 0 to 9.
+    ///
+    /// Level 0 is [`Gzip::new`]: the fastest by far, with output a few
+    /// percent larger than libdeflate's at level 1.  Levels 1 to 9 search
+    /// each payload the way libdeflate does at the same level and give it
+    /// codes of its own, so their output depends on nothing but the payload.
+    /// For a payload of up to 32 KiB it is the size of libdeflate's at that
+    /// level, within 0.1%.  For a longer one at levels 2 to 9 it is that
+    /// size within a fraction of a percent or smaller: matches of three
+    /// bytes are looked for only in data where they pay, which is also what
+    /// saves the most time.  These levels take less time than libdeflate;
+    /// the README has the figures.
+    ///
+    /// # Panics
+    ///
+    /// If `level` is above 9.
+    pub fn with_level(level: u8) -> Self {
+        assert!(level <= 9, "fastgzip has levels 0 to 9");
+        if level == 0 {
+            return Self::new();
+        }
+        Gzip { kind: Kind::Level(level, Box::new(levels::Levels::new(level))), out: Vec::new() }
+    }
+
+    /// The level this compressor was made with.
+    pub fn level(&self) -> u8 {
+        match &self.kind {
+            Kind::Shared(_) => 0,
+            Kind::Level(level, _) => *level,
+        }
     }
 
     /// Compress `payload` into this compressor's buffer and return the gzip
     /// bytes.  They are valid until the next call.
     pub fn compress(&mut self, payload: &[u8]) -> &[u8] {
         let n = payload.len();
-        if n >= MIN_ONE_PASS && self.st.valid && self.st.direct_ok {
+        let st = match &mut self.kind {
+            Kind::Shared(st) => &mut **st,
+            Kind::Level(level, lv) => {
+                let crc = crc32fast::hash(payload);
+                let cap = levels::Levels::room(n);
+                self.out.clear();
+                self.out.reserve(cap);
+                let out = self.out.as_mut_ptr();
+                // SAFETY: the buffer has `cap` bytes, which is what `deflate`
+                // asks for, with the 18 bytes of gzip around it.  Every byte
+                // up to the new length is written before it is set.
+                unsafe {
+                    let mut header = GZIP_HEADER;
+                    header[8] = match *level {
+                        1 => 4,
+                        2..=7 => 0,
+                        _ => 2,
+                    };
+                    core::ptr::copy_nonoverlapping(header.as_ptr(), out, 10);
+                    let bits = lv.deflate(payload, out.add(10), cap - 10);
+                    let o = 10 + bits.div_ceil(8);
+                    debug_assert!(o + 8 <= cap);
+                    core::ptr::copy_nonoverlapping(crc.to_le_bytes().as_ptr(), out.add(o), 4);
+                    core::ptr::copy_nonoverlapping((n as u32).to_le_bytes().as_ptr(), out.add(o + 4), 4);
+                    self.out.set_len(o + 8);
+                }
+                return &self.out;
+            }
+        };
+        if n >= MIN_ONE_PASS && st.valid && st.direct_ok {
             fetch_encoder(n);
         }
         // The checksum first.  It reads the payload front to back, which
@@ -163,7 +251,6 @@ impl Gzip {
         self.out.clear();
         self.out.reserve(cap); // no call once the buffer has grown
         let out = self.out.as_mut_ptr();
-        let st = &mut *self.st;
 
         // SAFETY: the buffer has `cap` bytes; the encoder is given what is
         // left of them and stays within what the comment above adds up.
@@ -184,10 +271,34 @@ impl Gzip {
         &self.out
     }
 
+    /// Levels 1 to 9 have two implementations of each search that find the
+    /// same matches: a plain one, which is libdeflate's line by line but for
+    /// what `levels.rs` lists, and the fast one that is used.  This chooses
+    /// the plain one for every payload, for tests to compare.
+    #[doc(hidden)]
+    pub fn __plain_search(&mut self, plain: bool) {
+        if let Kind::Level(_, lv) = &mut self.kind {
+            lv.fast = !plain;
+        }
+    }
+
+    /// Levels 1 to 9 write a block in one of two ways, chosen by machine
+    /// and payload, that give the same bytes.  This chooses, for tests to
+    /// compare.
+    #[doc(hidden)]
+    pub fn __writer_asks(&mut self, asks: bool) {
+        if let Kind::Level(_, lv) = &mut self.kind {
+            lv.asks = Some(asks);
+        }
+    }
+
     /// How this compressor's blocks have been written so far.  If `own_codes`
     /// keeps growing, the payloads it is given are not of one kind.
     pub fn stats(&self) -> Stats {
-        self.st.stats
+        match &self.kind {
+            Kind::Shared(st) => st.stats,
+            Kind::Level(_, lv) => lv.stats,
+        }
     }
 }
 

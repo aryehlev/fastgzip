@@ -27,8 +27,18 @@ jobs:
         run: cargo run --profile checked --example stress -- 1 50000 dump.bin
       - name: The same outputs read back by zlib and gzip
         run: python3 -I tools/check_dump.py dump.bin --gzip 1000
+      - name: Stress runs at levels 1 to 9
+        run: |
+          for level in 1 2 3 4 5 6 7 8 9; do
+            LEVEL=$level cargo run --profile checked --example stress -- 1$level 5000 dump$level.bin
+          done
+      - name: The outputs of levels 1, 5 and 9 read back by zlib and gzip
+        run: |
+          for level in 1 5 9; do
+            python3 -I tools/check_dump.py dump$level.bin --gzip 300
+          done
   # The encoder reads and writes through raw pointers: Miri checks the unit
-  # tests and a test that takes every path once.
+  # tests and the tests that take every path once.
   miri:
     strategy:
       fail-fast: false

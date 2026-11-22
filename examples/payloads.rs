@@ -6,7 +6,8 @@
 //!     cargo run --release --example payloads -- requests.jsonl
 //!
 //! The file has one payload per line.  With a second argument `records` it is
-//! [u32 length][bytes] repeated instead.
+//! [u32 length][bytes] repeated instead.  The environment variable LEVEL
+//! chooses the level (0 without it).
 use std::io::Read;
 use std::time::Instant;
 
@@ -30,7 +31,8 @@ fn main() {
     }
     assert!(!payloads.is_empty(), "no payloads in {path}");
 
-    let mut gz = fastgzip::Gzip::new();
+    let level: u8 = std::env::var("LEVEL").map_or(0, |l| l.parse().unwrap());
+    let mut gz = fastgzip::Gzip::with_level(level);
     let (mut bytes_in, mut bytes_out) = (0usize, 0usize);
     let mut back = Vec::new();
     for p in &payloads {
@@ -52,7 +54,7 @@ fn main() {
         }
         best = best.min(t.elapsed().as_secs_f64());
     }
-    println!("{} payloads, {} B on average", payloads.len(), bytes_in / payloads.len());
+    println!("level {level}: {} payloads, {} B on average", payloads.len(), bytes_in / payloads.len());
     println!(
         "output: {} B on average, {:.1}% of the input",
         bytes_out / payloads.len(),

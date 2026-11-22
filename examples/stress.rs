@@ -5,7 +5,8 @@
 //!
 //! With a third argument every output is also appended to that file, as
 //! [u32 input length][u32 CRC-32 of the input][u32 output length][output],
-//! for checking with other decoders.
+//! for checking with other decoders.  The environment variable LEVEL chooses
+//! the level (0 without it).
 #[path = "../tests/gen/mod.rs"]
 mod gen;
 
@@ -19,7 +20,8 @@ fn main() {
     let count: usize = args.get(2).map_or(100_000, |s| s.parse().unwrap());
     let mut dump = args.get(3).map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    let mut gz: Vec<fastgzip::Gzip> = (0..4).map(|_| fastgzip::Gzip::new()).collect();
+    let level: u8 = std::env::var("LEVEL").map_or(0, |l| l.parse().unwrap());
+    let mut gz: Vec<fastgzip::Gzip> = (0..4).map(|_| fastgzip::Gzip::with_level(level)).collect();
     let mut back = Vec::new();
     let (mut bytes_in, mut bytes_out) = (0u64, 0u64);
     // Phases, as traffic has them: a long stretch of one kind of request,
@@ -28,8 +30,8 @@ fn main() {
     let mut left = 0;
     for i in 0..count {
         if left == 0 {
-            phase = rng.below(6);
-            left = 1 + rng.below(400);
+            phase = rng.below(7);
+            left = 1 + rng.below(if phase == 6 { 12 } else { 400 });
         }
         left -= 1;
         let data = match phase {
@@ -52,6 +54,20 @@ fn main() {
                 d
             }
             4 => any_payload(&mut rng, 9000),
+            6 => {
+                // long ones: requests one after another, to 30 KB and
+                // beyond, some to several hundred
+                let most = if rng.below(4) == 0 { 400_000 } else { 80_000 };
+                let size = 30_000 + rng.below(most);
+                let mut d = Vec::with_capacity(size + 7000);
+                while d.len() < size {
+                    let kind = rng.below(4);
+                    let part = 300 + rng.below(6000);
+                    d.extend_from_slice(&request(&mut rng, part, kind));
+                }
+                d.truncate(size);
+                d
+            }
             _ => {
                 let max = if rng.below(8) == 0 { 200_000 } else { 20_000 };
                 any_payload(&mut rng, max)
@@ -62,7 +78,7 @@ fn main() {
         back.clear();
         MultiGzDecoder::new(out).read_to_end(&mut back).unwrap_or_else(|e| panic!("payload {i}: {e}"));
         assert!(back == data, "payload {i} ({} bytes) did not come back", data.len());
-        assert!(out.len() <= 18 + data.len() + 24 * (data.len() / 16384 + 1), "payload {i} grew");
+        assert!(out.len() <= 18 + data.len() + 24 * (data.len() / 5000 + 1), "payload {i} grew");
         bytes_in += data.len() as u64;
         bytes_out += out.len() as u64;
         if let Some(f) = dump.as_mut() {
@@ -72,10 +88,13 @@ fn main() {
             f.write_all(out).unwrap();
         }
         if rng.below(5000) == 0 {
-            gz[which] = fastgzip::Gzip::new();
+            gz[which] = fastgzip::Gzip::with_level(level);
         }
     }
-    println!("ok: seed {seed}, {count} payloads, {bytes_in} -> {bytes_out} bytes, {:?}", gz[0].stats());
+    println!(
+        "ok: level {level}, seed {seed}, {count} payloads, {bytes_in} -> {bytes_out} bytes, {:?}",
+        gz[0].stats()
+    );
 }
 
 /// CRC-32 the slow, obvious way: not the code the crate uses.
