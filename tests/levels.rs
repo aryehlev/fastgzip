@@ -92,7 +92,8 @@ fn every_shape() {
 
 /// Each search has a plain form, which follows libdeflate line by line, and
 /// the fast one that is used.  They must find the same matches: the output
-/// is the same byte for byte.  Here for payloads of up to 32 KiB.
+/// is the same byte for byte.  Here for payloads of up to 32 KiB, most of
+/// them short.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn fast_and_plain_searches_agree() {
@@ -125,6 +126,78 @@ fn fast_and_plain_searches_agree() {
             data.extend((0..9000).map(|_| rng.u32() as u8));
             data.extend(requests(&mut rng, 9000));
             both(&data);
+        }
+    }
+}
+
+/// The same from 8 KiB to 32 KiB.  At levels 2 to 9 a payload longer than
+/// 8192 bytes is searched by other code than a shorter one, which also does
+/// what libdeflate does not: it looks for matches of three bytes only in a
+/// block that begins like binary data, enters the first position under its
+/// own hash, and leaves the last seven bytes alone.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn fast_and_plain_searches_agree_from_8_kib() {
+    for level in 1..=9 {
+        let mut rng = Rng(270 + level as u64);
+        let mut fast = Gzip::with_level(level);
+        let mut plain = Gzip::with_level(level);
+        plain.__plain_search(true);
+        let mut both = |data: &[u8]| {
+            let a = fast.compress(data).to_vec();
+            assert!(a == plain.compress(data), "level {level}, {} bytes", data.len());
+        };
+        // Lengths around the one at which the search changes, at which a
+        // block can first be ended early (10000), at which the chains of
+        // the higher levels take more room (16384), and the last before the
+        // tables begin to forget.
+        for n in [
+            8185usize, 8191, 8192, 8193, 8194, 8200, 9999, 10_000, 10_001, 12_345, 16_383, 16_384, 16_385,
+            20_000, 32_761, 32_767, 32_768,
+        ] {
+            both(&requests(&mut rng, n));
+            both(&binary(&mut rng, n));
+            both(&vec![b'z'; n]);
+            let unit: Vec<u8> = (0..700).map(|_| b'a' + rng.below(26) as u8).collect();
+            let mut data = unit.repeat(n / 700 + 1);
+            data.truncate(n);
+            both(&data);
+            // What a block begins with decides how all of it is searched.
+            let mut data = binary(&mut rng, n / 2);
+            data.extend_from_slice(&requests(&mut rng, n - n / 2));
+            both(&data);
+            let mut data = requests(&mut rng, n / 2);
+            data.extend_from_slice(&binary(&mut rng, n - n / 2));
+            both(&data);
+        }
+        // Other lengths and shapes.
+        for i in 0..120 {
+            let size = 8193 + rng.below(24_576);
+            both(&request(&mut rng, size, i % 4));
+            both(&any_payload(&mut rng, 32_768));
+            let size = 8193 + rng.below(24_576);
+            both(&binary(&mut rng, size));
+        }
+        // A change in what the payload holds, where a block is worth
+        // ending, and the block after it begins like binary data.
+        for _ in 0..6 {
+            let mut data = requests(&mut rng, 11_000);
+            data.extend_from_slice(&binary(&mut rng, 12_000));
+            data.extend_from_slice(&requests(&mut rng, 9000));
+            both(&data);
+        }
+        // The first position found again, early and late.
+        let zero = hashed_to_zero();
+        for at in [4usize, 9, 3000, 8000, 8185, 12_000, 30_000] {
+            let mut data = requests(&mut rng, 32_000);
+            data[..4].copy_from_slice(&zero);
+            for k in [at, at + 9, at + 400] {
+                data[k..k + 4].copy_from_slice(&zero);
+                data[k + 4..k + 12].copy_from_slice(&[b'#'; 8]);
+            }
+            data[4..12].copy_from_slice(&[b'#'; 8]);
+            both(&data);
+            both(&data[..(at + 500).max(8193)]);
         }
     }
 }
@@ -218,25 +291,38 @@ fn fast_and_plain_searches_agree_on_large_payloads() {
     }
 }
 
-/// At levels 1 to 9 a payload's output depends on nothing but the payload.
+/// At levels 1 to 9 a payload's output depends on nothing but the payload:
+/// not on the lengths of those before it, which decide how much of the
+/// tables is in use and which search left them as they are, nor on what
+/// those held.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn output_does_not_depend_on_what_came_before() {
     let mut rng = Rng(300);
-    let payloads: Vec<Vec<u8>> = (0..40)
+    let mut payloads: Vec<Vec<u8>> = (0..40)
         .map(|i| {
             let size = 200 + rng.below(9000);
             request(&mut rng, size, i % 4)
         })
         .collect();
+    for n in [8193usize, 9000, 15_000, 16_385, 30_000, 33_000, 70_000] {
+        payloads.push(requests(&mut rng, n));
+        payloads.push(binary(&mut rng, n));
+        let mut mixed = requests(&mut rng, n / 2);
+        mixed.extend_from_slice(&binary(&mut rng, n / 2));
+        payloads.push(mixed);
+    }
+    // In any order.
+    for i in (1..payloads.len()).rev() {
+        payloads.swap(i, rng.below(i + 1));
+    }
     for level in 1..=9 {
         let mut gz = Gzip::with_level(level);
         let alone: Vec<Vec<u8>> =
             payloads.iter().map(|p| Gzip::with_level(level).compress(p).to_vec()).collect();
-        for _ in 0..2 {
-            for (p, want) in payloads.iter().zip(&alone).rev() {
-                assert!(gz.compress(p) == &want[..], "level {level}");
-            }
+        // Forwards, then backwards: each payload after two others.
+        for (p, want) in payloads.iter().zip(&alone).chain(payloads.iter().zip(&alone).rev()) {
+            assert!(gz.compress(p) == &want[..], "level {level}, {} bytes", p.len());
         }
     }
 }
@@ -296,7 +382,7 @@ fn block_edges() {
         let mut gz = Gzip::with_level(level);
         let mut rng = Rng(600 + level as u64);
         let unit: Vec<u8> = (0..700).map(|_| b'a' + rng.below(26) as u8).collect();
-        for n in (1020..1300).chain(32_750..32_790).chain(65_520..65_550) {
+        for n in (1020..1300).chain(8170..8220).chain(32_750..32_790).chain(65_520..65_550) {
             let mut data = unit.repeat(n / 700 + 1);
             data.truncate(n);
             check(&mut gz, &data);
@@ -308,9 +394,9 @@ fn block_edges() {
 }
 
 /// What a payload of more than 32 KiB takes that a smaller one does not: the
-/// window of level 1 moving, the tables counted anew, chains walked four
-/// steps at a time.  Mostly long runs, so that it is little work: small
-/// enough for Miri.
+/// window of level 1 moving, and at the levels above it the tables counted
+/// anew and what is out of reach forgotten.  Mostly long runs, so that it
+/// is little work: small enough for Miri.
 #[test]
 fn large_paths_once() {
     let mut rng = Rng(800);
@@ -340,6 +426,41 @@ fn large_paths_once() {
         let mut gz = Gzip::with_level(level);
         let payload = if with_three { &other } else { &data };
         check(&mut gz, if cut == 0 { payload } else { &payload[..cut] });
+        assert!(gz.stats().own_codes >= 1);
+    }
+}
+
+/// What a payload of 8 KiB to 32 KiB takes at levels 2 to 9 that neither a
+/// shorter nor a longer one does: the search of long payloads in tables that
+/// never fill, where the levels that follow chains far keep theirs in room
+/// sized to the payload.  Small enough for Miri.
+#[test]
+fn mid_paths_once() {
+    let mut rng = Rng(850);
+    // Requests with long runs between them, and bytes of any value.
+    let mut data = request(&mut rng, 1500, 0);
+    data.resize(7600, b'z');
+    data.extend_from_slice(&request(&mut rng, 700, 1));
+    let other = binary(&mut rng, 16_390);
+    // (level, with matches of three bytes, length): a search that looks
+    // one position ahead with chains of either kind and two with the only
+    // kind it has, each without and with matches of three bytes; lengths
+    // that fill the room for the chains to the last entry, and that need
+    // the next size.
+    let runs: &[(u8, bool, usize)] = if cfg!(miri) {
+        &[(5, false, 0), (9, false, 0), (5, true, 8200), (7, true, 8200), (8, true, 16_384)]
+    } else {
+        &[
+            (2, false, 0), (4, false, 0), (5, false, 0), (6, false, 0), (7, false, 0), (9, false, 0),
+            (3, true, 8200), (5, true, 8200), (7, true, 8200), (8, true, 16_384), (9, true, 16_385),
+            (6, true, 16_390),
+        ]
+    };
+    for &(level, with_three, cut) in runs {
+        let mut gz = Gzip::with_level(level);
+        let payload = if with_three { &other[..cut] } else { &data[..] };
+        assert!(payload.len() > 8192 && payload.len() <= 32_768);
+        check(&mut gz, payload);
         assert!(gz.stats().own_codes >= 1);
     }
 }

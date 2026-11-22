@@ -1,4 +1,4 @@
-//! Levels 2 to 9 in a payload of more than 32768 bytes.
+//! Levels 2 to 9 in a payload of more than 8192 bytes (`levels::BIG_FROM`).
 //!
 //! The search is libdeflate's at the same level: its tables, its number of
 //! candidates, the length at which it stops looking, and its way of taking a
@@ -20,9 +20,15 @@
 //! * The payload's first position is entered under its own hash, not under
 //!   hash 0 as libdeflate enters it.
 //!
-//! So the output is not libdeflate's, match for match, as it is for payloads
-//! of up to 32768 bytes.  It is the same size to within a fraction of a
-//! percent, or smaller (see the README for what was measured).
+//! So the output is not libdeflate's, match for match, as it is for shorter
+//! payloads.  It is the same size to within a fraction of a percent, or
+//! smaller (see the README for what was measured).
+//!
+//! Shorter payloads are not searched this way.  Matches of three bytes are
+//! worth more the shorter a payload is, there being less to find a longer
+//! one in: without them the output of the levels that look ahead was
+//! measured 0.4 to 0.6% larger on JSON of 3.7 and 5 KB, where on JSON of
+//! 9 KB and more it is the same or smaller.
 //!
 //! `levels.rs` has this search in plain form, and that is what this one is
 //! tested against, byte for byte.  What is done here to make it quick:
@@ -41,7 +47,7 @@
 //!   load in four steps then waits for another.
 
 use crate::fast::{at32, at64, extend_at, fetch, lz_hash, raw_at32, rebase, Resume, Sink, WINDOW};
-use crate::levels::{later_min_len, Split, MAX_SEQS};
+use crate::levels::{later_min_len, Split, BIG_FROM, MAX_SEQS};
 use crate::tables::*;
 use crate::write::token;
 use core::ptr;
@@ -49,8 +55,13 @@ use core::ptr;
 /// libdeflate's tables, with 16 bits an entry: where a hash of three and of
 /// four bytes was last seen (32768 and 65536 entries), and for every position
 /// the one before it with the same hash of four bytes (`next`), or with
-/// `HOPS` the four before it (`links`), the nearest lowest.  The hash tables
-/// have been zeroed, and so has the first of `links`.
+/// `HOPS` the four before it (`links`), the nearest lowest.  The table of
+/// four-byte hashes has been zeroed, with `H3` the other one too, and with
+/// `HOPS` the first of `links`.
+///
+/// `next` and `links` have an entry for each position that is entered, as
+/// far as positions are told apart: 32768 of them, or in a payload shorter
+/// than that at least as many as it has bytes.
 ///
 /// An entry is a position plus 1 less `off`, and 0 stands for nothing.
 /// `off` is 0 for as long as entries fit in 16 bits, and is raised by 32768
@@ -334,7 +345,8 @@ impl<const H3: bool, const HOPS: bool> Chain<H3, HOPS> {
         splitting: bool,
         soft_end: usize,
     ) -> usize {
-        debug_assert!(n > WINDOW && min_len >= Self::SHORTEST && st.pos < soft_end && soft_end <= n);
+        debug_assert!(n > BIG_FROM && min_len >= Self::SHORTEST && st.pos < soft_end && soft_end <= n);
+        debug_assert!(!HOPS || !self.links.is_null());
         let f_ll = sink.f_ll;
         // Everything that says where is an entry, and `ent` is the address
         // that the byte of entry 0 would have: nothing in a step has to do

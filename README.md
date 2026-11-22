@@ -277,7 +277,8 @@ Every output is at most 18 bytes and 24 per 16 KiB larger than its input.
 levels 1 to 9, which are libdeflate's: each searches a payload the way
 libdeflate does at that level (`src/levels.rs` says what was taken from it),
 and the payload gets Huffman codes of its own. The output is the size of
-libdeflate's at the same level, and depends on nothing but the payload.
+libdeflate's at the same level to within a fraction of a percent, and
+depends on nothing but the payload.
 
 Microseconds per payload on one thread, and the size of the output against
 libdeflate's at level 1, for the synthetic 3.7 KB requests on the arm64
@@ -285,26 +286,25 @@ runner (Neoverse N2):
 
 | level | libdeflate | fastgzip | fastgzip's share of libdeflate's time | output: libdeflate | fastgzip |
 |---|---|---|---|---|---|
-| 0 | | **5.35** | 30% of level 1 | | +2.1% |
-| 1 | 17.80 | **15.12** | 85% | 0 | +0.05% |
-| 2 | 28.07 | **23.58** | 84% | +0.2% | +0.1% |
-| 3 | 28.46 | **23.91** | 84% | +0.1% | 0.0% |
-| 4 | 28.58 | **23.99** | 84% | 0.0% | -0.1% |
-| 5 | 32.35 | **26.37** | 82% | -1.7% | -1.7% |
-| 6 | 32.65 | **26.88** | 82% | -1.7% | -1.7% |
-| 7 | 32.75 | **27.06** | 83% | -1.7% | -1.7% |
-| 8 | 34.51 | **28.72** | 83% | -1.9% | -1.9% |
-| 9 | 34.43 | **28.63** | 83% | -1.9% | -1.9% |
+| 0 | | **5.36** | 30% of level 1 | | +2.1% |
+| 1 | 17.82 | **15.15** | 85% | 0 | +0.05% |
+| 2 | 28.12 | **23.00** | 82% | +0.2% | +0.1% |
+| 3 | 28.51 | **23.32** | 82% | +0.1% | 0.0% |
+| 4 | 28.57 | **23.36** | 82% | 0.0% | -0.1% |
+| 5 | 32.02 | **25.64** | 80% | -1.7% | -1.7% |
+| 6 | 32.36 | **26.08** | 81% | -1.7% | -1.7% |
+| 7 | 32.47 | **26.28** | 81% | -1.7% | -1.7% |
+| 8 | 34.30 | **27.90** | 81% | -1.9% | -1.9% |
+| 9 | 34.34 | **27.93** | 81% | -1.9% | -1.9% |
 
-Other sizes on the same machine, levels 1 to 9: 75 to 82% of libdeflate's
-time at 500 bytes, 72 to 85% at 1.5 KB, 80 to 85% at 5 KB, 85 to 90% at
-11 KB, 83 to 96% at 22 KB. Up to 32 KiB the output is within 0.1% of
-libdeflate's at every level and size that was measured, and the same number
-of bytes from 8 KiB on, where the tables are as large as libdeflate's.
+Other sizes on the same machine, levels 1 to 9: 74 to 82% of libdeflate's
+time at 500 bytes, 71 to 86% at 1.5 KB, 79 to 85% at 5 KB. Up to 8 KiB the
+search is libdeflate's in tables sized to the payload, and the output is
+within 0.1% of libdeflate's at every level and size that was measured.
 
-Above 32 KiB, levels 2 to 9 do one thing that libdeflate does not, and it
-is where most of their gain there comes from. libdeflate looks for matches
-of three bytes in every payload that holds 80 or more different bytes, and
+Above 8 KiB, levels 2 to 9 do one thing that libdeflate does not, and it is
+where most of their gain there comes from. libdeflate looks for matches of
+three bytes in every payload that holds 80 or more different bytes, and
 keeps a table for it into which every position goes. Here a block is
 searched for them only if its first 4 KiB hold 160 or more different bytes,
 which machine code does and text and JSON do not. In machine code those
@@ -315,40 +315,50 @@ same level on the same machine, and the output against libdeflate's:
 
 | payloads | size | level 1 | levels 2 to 9 | output at levels 2 to 9 |
 |---|---|---|---|---|
-| twelve, 24 and 100 of the synthetic requests in an array | 45, 90, 375 KB | 80 to 81% | 69 to 80% | 0.8 to 1.2% smaller |
-| source text | 200 KB | 101% | 77 to 86% | 0.1 to 0.2% larger |
-| machine code | 200 KB | 82% | 89 to 96% | less than 0.1% larger |
-| text, then machine code, then requests | 210 KB | 85% | 81 to 89% | 0.2% smaller to the same |
+| three to nine of the synthetic requests in an array | 9, 11, 16, 22, 30 KB | 82 to 88% | 65 to 76% | 0.8% smaller to 0.03% larger |
+| source text | 9, 12, 24 KB | 93 to 94% | 72 to 82% | within 0.1% at levels 2 to 4, 0.1 to 0.2% larger at 5 to 9 |
+| machine code | 9, 12, 24 KB | 79 to 86% | 86 to 93% | within 0.01% |
+| twelve, 24 and 100 of the synthetic requests in an array | 45, 90, 375 KB | 80 to 81% | 70 to 86% | 0.8 to 1.2% smaller |
+| source text | 200 KB | 101% | 78 to 87% | less than 0.2% larger |
+| machine code | 200 KB | 82% | 88 to 95% | less than 0.1% larger |
+| text, then machine code, then requests | 210 KB | 85% | 81 to 90% | 0.2% smaller to the same |
 
-(Each range is over the levels and over two runs. One of the 48 figures
-behind "69 to 80%" was 85%. At level 1 the output is libdeflate's size to
-the byte.)
+(Each range is over the levels and over two runs. Of the 48 figures behind
+"70 to 86%", 45 are 80% or less. At level 1 the output is libdeflate's size
+to the byte from 8 KiB on.)
 
-On an x86-64 runner (Intel Xeon 6975P-C): 72 to 81% of libdeflate's time up
-to 1.5 KB; from 1.8 to 5 KB, 80 to 89% at level 1 and 81 to 97% at the
-levels above; at 11 and 22 KB, 86 to 91% at level 1 and 96 to 106% above.
-Above 32 KiB: 78 to 83% at level 1 (108% on the text); at levels 2 to 9,
-75 to 82% on the requests, 88 to 96% on the text, 95 to 100% on the machine
-code and 89 to 93% on the mixed payloads.
+On an x86-64 runner (AMD EPYC 9V74): 68 to 73% of libdeflate's time at 500
+bytes and 68 to 85% at 1.5 and 1.8 KB; at 3.7 and 5 KB, 89 to 90% at level
+1 and 86 to 93% at the levels above. From 9 to 30 KB at levels 2 to 9: 70
+to 79% on the requests, 77 to 92% on the text and 91 to 101% on the machine
+code; at level 1, 83 to 92%, 99 to 101% and 81 to 89%. Above 32 KiB: 78 to
+83% at level 1 (105% on the text); at levels 2 to 9, 73 to 83% on the
+requests, 84 to 96% on the text, 94 to 102% on the machine code and 87 to
+92% on the mixed payloads.
 
 A compressor of these levels keeps 256 KiB of tables, of which a small
-payload touches only its share (56 KiB for payloads of up to 4 KiB); a
-payload above 32 KiB uses all of it, at levels 4 to 9 another 256 KiB, and
-8 bytes for every match of a block.
+payload touches only its share (56 KiB for payloads of up to 4 KiB) and a
+payload above 8 KiB up to all of it, and 8 bytes for every match of a
+block. Where chains of candidates are followed far, they are kept in
+memory of their own, allocated when the first payload comes that needs it:
+one above 8 KiB at levels 6 to 9, above 32 KiB at levels 4 and 5. That is
+8 bytes for each byte of the longest such payload, rounded up to a power of
+two, and no more than 256 KiB.
 
-So these levels are libdeflate's in less time. On arm64 that is 15 to 28%
-less up to 5 KB, 10 to 15% less at 11 KB and 4 to 17% less at 22 KB; above
-32 KiB, 20 to 31% less on JSON, 14 to 23% on text and 4 to 11% on machine
-code. They do not gain what level 0 gains, and cannot:
+So these levels are libdeflate's in less time. On arm64 that is 14 to 29%
+less up to 5 KB. From 9 to 30 KB at levels 2 to 9 it is 24 to 35% less on
+JSON, 18 to 28% on text and 7 to 14% on machine code; above 32 KiB, 14 to
+30% less on JSON, 13 to 22% on text and 5 to 12% on machine code. They do
+not gain what level 0 gains, and cannot:
 
 - Their time goes into the search and into making each payload's codes, and
   libdeflate does both about as fast as they can be done. What is left to
   save is what a payload does not need. A small one does not need tables of
   full size: libdeflate clears 128 KiB of them per call at level 1 and
   192 KiB at the levels above, and then works in tables of that size, where
-  here they are sized to the payload (`fast_order` in `src/levels.rs`). A
-  large one of text or JSON does not need the table for matches of three
-  bytes (above).
+  here they are sized to the payload (`fast_order` in `src/levels.rs`).
+  One of more than 8 KiB of text or JSON does not need the table for
+  matches of three bytes (above).
 - Level 0's way, codes shared between payloads, was tried at these levels.
   It saves the making of codes, a quarter of the time at level 1, and costs
   some 25 bytes per payload, 1% of the output at 4 KB and 2% at 2 KB: shared
@@ -367,13 +377,16 @@ Tried at these levels and left out, measured on both runners:
 - **Hashing a position, or loading its table entry, one step early**, so
   that the answer is there when a step asks whether it is a literal: no
   gain on arm64, and the second 3 to 5% slower on one x86-64 machine.
-- **Chains walked four steps at a time** (which payloads above 32 KiB get
-  at levels 4 to 9) for smaller payloads: 2 to 6% quicker on x86-64 from
-  16 KiB on, 2 to 3% slower on arm64 at levels 5 and 6.
+- **Chains walked four steps at a time at levels 4 and 5 from 8 to
+  32 KiB** (where only levels 6 to 9 have them; above 32 KiB levels 4 to 9
+  do): on arm64 it took 69 to 74% of libdeflate's time on JSON where
+  walking them one step at a time takes 66 to 72%, and the same on text
+  and machine code. On one x86-64 machine (Intel Xeon 6975P-C) it was
+  quicker by up to 6 points of libdeflate's time, most on text.
 - **A match's length limits kept from step to step** and cut down only
   near the end of the payload: 1 to 2% slower.
 
-And for payloads above 32 KiB:
+And for payloads above 8 KiB, the first three measured above 32 KiB:
 
 - **Matches of three bytes in every block, as libdeflate has them**: its
   output to within 0.01%, at 88 to 100% of its time on arm64 where the
@@ -392,6 +405,13 @@ And for payloads above 32 KiB:
   at a time, for the levels that look at many candidates: entering a
   position costs more than it does in a chain, and a first form was 7 to
   27% slower than libdeflate on one x86-64 machine. Not taken further.
+- **The same search below 8 KiB**, where a match of three bytes is worth
+  more, there being less to find a longer one in. On the 3.7 and 5 KB
+  requests it took 66 to 68% of libdeflate's time on arm64 (timed at
+  levels 2, 5 and 9, in tables of full size), where the search they have
+  takes 79 to 82%. At levels 2 to 4 the output was 0.3 to 0.4% smaller; at
+  levels 5 to 9, 0.4 to 0.6% larger. Left as it is: the higher levels are
+  chosen for their size.
 
 Which level, then: 0 if time matters; 5 if output 4% smaller is worth five
 times the time. The gain of libdeflate's levels on payloads like these comes
@@ -423,14 +443,17 @@ an optimized build.
   of every shape and of up to 650 KB, among them payloads made to end a
   block in each of the ways a block can end; both ways of writing a block
   compared likewise; 20,000 payloads per level through the stress run on
-  each runner, a part of them longer than 32 KiB, those of three levels read
-  back by zlib and 500 of each by gzip; the tests that take every path once
-  under Miri. From 8 to 32 KiB, where the tables are as large as
-  libdeflate's, the output has libdeflate's size to the byte, which is how
-  it is known that the searches are the same. Above 32 KiB it is within
-  0.01% of that size when every block is searched for matches of three
-  bytes, as libdeflate searches it; the rest of the difference is the
-  payload's first position and its last seven bytes (`src/big.rs`).
+  each runner, a part of them longer than 8 KiB and a part longer than
+  32 KiB, those of three levels read back by zlib and 500 of each by gzip;
+  the tests that take every path once under Miri. That the searches are
+  libdeflate's is known from the sizes. Up to 8 KiB: with the tables made
+  as large as libdeflate's, each of 2,140 payloads of 500 bytes to 5 KB
+  came out at libdeflate's size to the byte at every level. At level 1
+  every payload from 8 KiB on does as it is. Above 8 KiB at levels 2 to 9,
+  with every block searched for matches of three bytes as libdeflate
+  searches it, the output is within 0.03% of libdeflate's on payloads of 9
+  to 30 KB and within 0.01% on longer ones; what is left is the payload's
+  first position and its last seven bytes (`src/big.rs`).
 - **Rust 1.83** builds the library.
 
 The workflow in `.github/workflows/ci.yml` repeats all of this at every push,
@@ -465,10 +488,15 @@ two calls.
 - For payloads of mixed kinds on one compressor, and for very repetitive
   payloads (most of the input covered by long repetitions), the output is
   further from libdeflate's than the figures above; see Output size.
-- Above 32 KiB, levels 2 to 9 save least on machine code and other data
-  that uses every byte value: 4 to 11% of libdeflate's time on arm64, and
-  nothing on x86-64. On x86-64 they also save nothing on payloads of 11 to
-  22 KB, and take up to 6% more than libdeflate at 22 KB (see Levels).
+- Above 8 KiB, levels 2 to 9 save least on machine code and other data
+  that uses every byte value: 5 to 14% of libdeflate's time on arm64, and
+  on x86-64 between 9% and nothing (see Levels).
+- Above 8 KiB, source text comes out 0.1 to 0.2% larger than libdeflate's
+  at levels 5 to 9, for want of the matches of three bytes that JSON is
+  smaller without. And a block is judged by its first 4 KiB: machine code
+  that begins like text is searched like text. The x86-64 runner's own
+  machine code in pieces of 12 KB came out 0.1% larger than libdeflate's
+  for that.
 - Level 0 and levels 1 to 9 are two different things (see Levels); there is
   nothing in between.
 - Needs Rust 1.83 or later.

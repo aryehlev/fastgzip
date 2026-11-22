@@ -125,9 +125,12 @@ struct State {
 /// per call once the buffer has grown to fit.  The working memory is about
 /// 80 KiB at level 0.  At levels 1 to 9 it is 256 KiB of tables, of which
 /// only what the payloads need is ever touched: 56 KiB for payloads of up to
-/// 4 KiB (32 KiB at level 1), twice that for up to 8 KiB, and so on.  A
-/// payload of more than 32 KiB uses the tables in full, and at levels 4 to 9
-/// another 256 KiB that is allocated when the first such payload comes.
+/// 4 KiB (32 KiB at level 1), twice that for up to 8 KiB, and up to all of
+/// it for longer ones.  The levels that follow chains of candidates far
+/// keep them in memory of their own, allocated when the first payload comes
+/// that needs it: one of more than 8 KiB at levels 6 to 9, of more than
+/// 32 KiB at levels 4 and 5.  That is 8 bytes for each byte of the longest
+/// such payload, rounded up to a power of two and no more than 256 KiB.
 /// These levels also keep the matches of a block, 8 bytes for every three
 /// bytes of payload up to 400 KiB (64 KiB at level 1).  A `Gzip` is `Send`,
 /// so it can live in a `thread_local!`, in a pool, or in a task.
@@ -177,12 +180,12 @@ impl Gzip {
     /// percent larger than libdeflate's at level 1.  Levels 1 to 9 search
     /// each payload the way libdeflate does at the same level and give it
     /// codes of its own, so their output depends on nothing but the payload.
-    /// For a payload of up to 32 KiB it is the size of libdeflate's at that
-    /// level, within 0.1%.  For a longer one at levels 2 to 9 it is that
-    /// size within a fraction of a percent or smaller: matches of three
-    /// bytes are looked for only in data where they pay, which is also what
-    /// saves the most time.  These levels take less time than libdeflate;
-    /// the README has the figures.
+    /// For a payload of up to 8 KiB, and for any payload at level 1, it is
+    /// the size of libdeflate's at that level, within 0.1%.  For a longer
+    /// one at levels 2 to 9 it is that size within a fraction of a percent
+    /// or smaller: matches of three bytes are looked for only in data where
+    /// they pay, which is also what saves the most time.  These levels take
+    /// less time than libdeflate; the README has the figures.
     ///
     /// # Panics
     ///

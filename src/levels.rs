@@ -7,7 +7,7 @@
 //! position is tried first, the shortest match worth taking, where a block
 //! ends, and which kind of block it becomes.
 //!
-//! For a payload of up to 32768 bytes, and for any payload at level 1, the
+//! For a payload of up to 8192 bytes, and for any payload at level 1, the
 //! matches are libdeflate's, and the output has the same size to within a
 //! few bytes.  What differs:
 //!
@@ -15,7 +15,7 @@
 //!     clears 128 KiB per call at level 1 and 192 KiB at the levels above.
 //!   - The block is written by this crate's encoder (`write.rs`).
 //!
-//! A payload of more than 32768 bytes is searched at levels 2 to 9 with
+//! A payload of more than 8192 bytes is searched at levels 2 to 9 with
 //! three more differences, of which the first is what makes it quick
 //! (`big.rs` has what was measured):
 //!
@@ -64,6 +64,14 @@ const SOFT_MAX_BLOCK: usize = 300_000;
 pub(crate) const MAX_SEQS: usize = 50_000;
 /// No block is shorter than this, except the last.
 const MIN_BLOCK: usize = 5000;
+/// At levels 2 to 9 a payload longer than this is searched by `big.rs`, a
+/// shorter one by `fast.rs`.  From here on the tables are as large as they
+/// get, and leaving matches of three bytes out of text and JSON (see
+/// `first_look`) costs little or nothing: measured on payloads of 9 to
+/// 30 KB, JSON came out up to 0.8% smaller than libdeflate's and source text
+/// up to 0.2% larger.  On JSON of 3.7 and 5 KB the levels that look ahead
+/// would give output 0.4 to 0.6% larger.
+pub(crate) const BIG_FROM: usize = 8192;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Parse {
@@ -146,9 +154,9 @@ fn extend(inp: &[u8], a: usize, b: usize, start: usize, max: usize) -> usize {
 /// What block splitting looks at: how often each kind of symbol occurred in
 /// the block so far, and since the last look.  libdeflate's heuristic.
 pub(crate) struct Split {
-    pub(crate) new_obs: [u32; 10],
+    new_obs: [u32; 10],
     obs: [u32; 10],
-    pub(crate) num_new: u32,
+    num_new: u32,
     num: u32,
 }
 
@@ -159,27 +167,18 @@ impl Split {
 
     /// The kind of symbol a literal is: one of eight.
     #[inline(always)]
-    pub(crate) fn kind(b: u8) -> usize {
+    fn kind(b: u8) -> usize {
         (((b >> 5) & 6) | (b & 1)) as usize
     }
 
     #[inline(always)]
-    pub(crate) fn literal(&mut self, b: u8) {
+    fn literal(&mut self, b: u8) {
         self.new_obs[Self::kind(b)] += 1;
         self.num_new += 1;
     }
 
-    /// The first length of the block at which `ends_at` can be true, if the
-    /// block's bytes up to there are `more` literals and the payload has
-    /// `remaining` bytes from here on; `None` if it cannot be any more.
     #[inline(always)]
-    pub(crate) fn may_end_at(&self, block_len: usize, remaining: usize) -> Option<usize> {
-        let at = (block_len + 512usize.saturating_sub(self.num_new as usize).max(1)).max(MIN_BLOCK);
-        (remaining >= MIN_BLOCK && at - block_len <= remaining - MIN_BLOCK).then_some(at)
-    }
-
-    #[inline(always)]
-    pub(crate) fn matched(&mut self, len: usize) {
+    fn matched(&mut self, len: usize) {
         self.new_obs[8 + (len >= 9) as usize] += 1;
         self.num_new += 1;
     }
@@ -187,15 +186,18 @@ impl Split {
     /// Should a block that is `block_len` bytes long, with `remaining` bytes
     /// of payload after it, end here?
     #[inline(always)]
-    pub(crate) fn ends_at(&mut self, block_len: usize, remaining: usize) -> bool {
+    fn ends_at(&mut self, block_len: usize, remaining: usize) -> bool {
         self.num_new >= 512
             && block_len >= MIN_BLOCK
             && remaining >= MIN_BLOCK
             && self.check(block_len)
     }
 
-    /// `may_end_at` for a search that keeps no count of the kinds: `num_now`
-    /// is the number of literals and matches the block has so far.
+    /// For a search that keeps no count of the kinds (`big.rs`), `num_now`
+    /// being the number of literals and matches the block has so far: the
+    /// first length of the block at which `ends_at_counted` can be true, if
+    /// the block's bytes up to there are all literals and the payload has
+    /// `remaining` bytes from here on; `None` if it cannot be any more.
     #[inline(always)]
     pub(crate) fn may_end_at_counted(&self, num_now: u32, block_len: usize, remaining: usize) -> Option<usize> {
         let num_new = (num_now - self.num) as usize;
@@ -283,17 +285,17 @@ fn choose_min_len(used: u32, depth: u32) -> usize {
     min_len
 }
 
-/// A block of a payload of more than 32768 bytes is searched for matches of
-/// three bytes only if its first 4 KiB hold at least this many different
-/// bytes.  Machine code mostly holds 200 and more, and with such matches
-/// comes out 1.5 to 3% smaller; text and JSON hold fewer than 100, and come
-/// out the same (text) or 1% larger (JSON) with them, in a tenth to a fifth
-/// more time.
+/// A block of a payload of more than `BIG_FROM` bytes is searched for
+/// matches of three bytes only if its first 4 KiB hold at least this many
+/// different bytes.  Machine code mostly holds 200 and more, and with such
+/// matches comes out 1.5 to 3% smaller; text and JSON hold fewer than 100,
+/// and come out the same (text) or 1% larger (JSON) with them, in a tenth to
+/// a fifth more time.
 const BINARY: u32 = 160;
 
 /// `choose_min_len` for a block, from its first 4 KiB; and whether the block
 /// is searched for matches of three bytes if the payload is longer than
-/// 32768 bytes.
+/// `BIG_FROM` bytes.
 pub(crate) fn first_look(block: &[u8], depth: u32) -> (usize, bool) {
     if block.len() < 512 {
         return (MIN_MATCH, false);
@@ -342,8 +344,8 @@ struct Search<'a> {
     /// The block may be ended early, so `split` is kept.
     splitting: bool,
     split: &'a mut Split,
-    /// A payload of more than 32768 bytes at levels 2 to 9: its last seven
-    /// bytes are not searched, and each of its blocks begins with the
+    /// A payload of more than `BIG_FROM` bytes at levels 2 to 9: its last
+    /// seven bytes are not searched, and each of its blocks begins with the
     /// hashes of its first position worked out anew.
     big: bool,
     /// The block at hand is searched for matches of three bytes: any block
@@ -840,9 +842,12 @@ pub(crate) struct Levels {
     pub(crate) asks: Option<bool>,
     pub(crate) stats: Stats,
     t: Box<Tables>,
-    /// The chains of levels 4 to 9 in a payload of more than 32768 bytes
-    /// (`big::Chain::links`): 256 KiB, allocated when the first such payload
-    /// comes.
+    /// The chains of the levels that follow them far (`big::Chain::links`),
+    /// allocated when the first payload comes that is searched with them:
+    /// one of more than `BIG_FROM` bytes at levels 6 to 9, of more than
+    /// 32768 at levels 4 and 5.  An entry for each position that the tables
+    /// tell apart: as many as the longest such payload so far has bytes,
+    /// rounded up to a power of two, and no more than 32768 (256 KiB).
     links: Vec<u64>,
     seqs: Vec<Token>,
     f_ll: [u32; NUM_LL],
@@ -923,14 +928,11 @@ impl Levels {
         }
     }
 
-    /// `deflate` with the searches of `fast.rs`, which take every payload of
-    /// eight bytes or more.
+    /// `deflate` with the searches of `fast.rs` and `big.rs`, which between
+    /// them take every payload of eight bytes or more.
     unsafe fn deflate_fast(&mut self, inp: &[u8], lg: u32, out: *mut u8, cap: usize) -> Option<usize> {
         use crate::fast::*;
         let n = inp.len();
-        // A payload of more than 32768 bytes is searched in tables of
-        // libdeflate's size, which forget what is out of reach.
-        let big = n > WINDOW;
         // Where a search counts and writes down what it finds, with the
         // counts at zero.  Made anew for every block: these are pointers
         // into `self`, and they are not used again once `self` has been.
@@ -980,6 +982,9 @@ impl Levels {
         let mut bitpos = 0;
 
         if self.parse == Parse::Fastest {
+            // A payload of more than 32768 bytes is searched in a table of
+            // libdeflate's size, which forgets what is out of reach.
+            let big = n > WINDOW;
             let tab = self.t.h4.as_mut_ptr().cast::<u32>();
             let order = if big { 15 } else { fast_order(lg) };
             // Zeroed as bytes: there is no faster way.
@@ -999,7 +1004,7 @@ impl Levels {
             }
         }
 
-        if big {
+        if n > BIG_FROM {
             return Some(self.deflate_big(inp, out, cap));
         }
 
@@ -1015,49 +1020,45 @@ impl Levels {
         let (o3, o4) = chain_orders(lg);
         core::ptr::write_bytes(c.h3, 0, 1 << o3);
         core::ptr::write_bytes(c.h4, 0, 1 << o4);
-        loop {
-            let begin = st.pos;
-            // A block can only be ended early if both parts are long enough.
-            let split: *mut Split = if n - begin >= 2 * MIN_BLOCK {
-                self.split = Split::new();
-                &mut self.split
-            } else {
-                core::ptr::null_mut()
-            };
-            let min_len = first_min_len(&inp[begin..], self.depth);
-            let sink = sink!();
-            let parse = self.parse;
-            let n_seqs = by_size!(lg; LG => match parse {
-                Parse::Greedy => greedy::<LG>(c, min_len, sink, &mut st, split),
-                Parse::Lazy => lazy::<LG>(c, min_len, false, sink, &mut st, split),
-                _ => lazy::<LG>(c, min_len, true, sink, &mut st, split),
-            }; 8 9 10 11 12 13 14 15);
-            if finish!(begin, st.pos, n_seqs, bitpos) {
-                return Some(bitpos);
-            }
-        }
+        // One block: a payload this short is never split.
+        let min_len = first_min_len(inp, self.depth);
+        let sink = sink!();
+        let parse = self.parse;
+        let n_seqs = by_size!(lg; LG => match parse {
+            Parse::Greedy => greedy::<LG>(c, min_len, sink),
+            Parse::Lazy => lazy::<LG>(c, min_len, false, sink),
+            _ => lazy::<LG>(c, min_len, true, sink),
+        }; 8 9 10 11 12 13);
+        finish!(0, n, n_seqs, bitpos);
+        Some(bitpos)
     }
 
-    /// `deflate` for a payload of more than 32768 bytes at levels 2 to 9:
-    /// the search of `big.rs`, block by block.
+    /// `deflate` for a payload of more than `BIG_FROM` bytes at levels 2 to
+    /// 9: the search of `big.rs`, block by block.
     unsafe fn deflate_big(&mut self, inp: &[u8], out: *mut u8, cap: usize) -> usize {
         use crate::big::Chain;
         use crate::fast::{Resume, Sink};
         let n = inp.len();
         let ip = inp.as_ptr();
         let (depth, nice, parse) = (self.depth, self.nice, self.parse);
-        // Where chains are followed far, a position holds its next four:
-        // measured, that is the quicker from 16 candidates on.
-        let hops = depth >= 16;
-        if hops && self.links.is_empty() {
-            self.links = vec![0; WINDOW];
+        // Where chains are followed far, a position holds the four before
+        // it and not one.  Measured, that is the quicker with more than 16
+        // candidates, and from 16 on in a payload of more than 32768 bytes.
+        // (The levels that look two positions ahead have hundreds.)
+        let hops = depth > 16 || (depth == 16 && n > WINDOW) || parse == Parse::Lazy2;
+        // A link for every position that can be entered.
+        let need = if n > WINDOW { WINDOW } else { n.next_power_of_two() };
+        if hops && self.links.len() < need {
+            self.links.resize(need, 0);
         }
         let h3 = self.t.h3.as_mut_ptr().cast::<u16>();
         let h4 = self.t.h4.as_mut_ptr().cast::<u16>();
         let next = self.t.next.as_mut_ptr().cast::<u16>();
-        let links = self.links.as_mut_ptr();
-        core::ptr::write_bytes(h3, 0, 1 << 15);
+        let links = if hops { self.links.as_mut_ptr() } else { core::ptr::null_mut() };
         core::ptr::write_bytes(h4, 0, 1 << 16);
+        // The table of three-byte hashes is cleared when the first block
+        // comes that uses it: most payloads have none.
+        let mut h3_cleared = false;
         if hops {
             // The link of "none" leads nowhere.  No other link is read
             // before it is written.
@@ -1073,6 +1074,10 @@ impl Levels {
             self.split = Split::new();
             let split: *mut Split = &mut self.split;
             let (min_len, binary) = first_look(&inp[begin..soft_end], depth);
+            if binary && !h3_cleared {
+                core::ptr::write_bytes(h3, 0, 1 << 15);
+                h3_cleared = true;
+            }
             self.f_ll = [0; NUM_LL];
             self.f_off = [0; NUM_OFF];
             let sink = Sink {
@@ -1102,8 +1107,10 @@ impl Levels {
                 (Parse::Greedy, true, false) => run!(0, true, false),
                 (Parse::Greedy, false, true) => run!(0, false, true),
                 (Parse::Greedy, true, true) => run!(0, true, true),
-                (Parse::Lazy, false, _) => run!(1, false, true),
-                (Parse::Lazy, true, _) => run!(1, true, true),
+                (Parse::Lazy, false, false) => run!(1, false, false),
+                (Parse::Lazy, true, false) => run!(1, true, false),
+                (Parse::Lazy, false, true) => run!(1, false, true),
+                (Parse::Lazy, true, true) => run!(1, true, true),
                 (_, false, _) => run!(2, false, true),
                 (_, true, _) => run!(2, true, true),
             };
@@ -1154,7 +1161,7 @@ impl Levels {
             f_off: &mut self.f_off,
             splitting: false,
             split: &mut self.split,
-            big: n > WINDOW && self.parse != Parse::Fastest,
+            big: n > BIG_FROM && self.parse != Parse::Fastest,
             with3: true,
         };
         let mut bitpos = 0;
