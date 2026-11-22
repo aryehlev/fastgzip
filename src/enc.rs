@@ -100,7 +100,7 @@ fn hash5<const BITS: u32>(x: u64) -> usize {
 /// `d` = distance - 1.  Arithmetic on the bit length of `d` instead of
 /// libdeflate's 512-byte table: no load, and nothing to fall out of cache.
 #[inline(always)]
-fn off_slot(d: u32) -> (usize, u32, u32) {
+pub(crate) fn off_slot(d: u32) -> (usize, u32, u32) {
     let bl = 32 - d.leading_zeros();
     let extra = bl.saturating_sub(2);
     let slot = if d < 2 { d } else { 2 * bl - 2 + ((d >> (bl - 2)) & 1) };
@@ -512,6 +512,30 @@ pub(crate) unsafe fn stored(inp: &[u8], out: *mut u8, cap: usize, last: bool) ->
     ptr::copy_nonoverlapping((!(n as u16)).to_le_bytes().as_ptr(), out.add(3), 2);
     ptr::copy_nonoverlapping(inp.as_ptr(), out.add(5), n);
     8 * (n + 5)
+}
+
+/// `inp` as stored blocks from bit `bitpos` on, which may be inside a byte.
+/// A stored block is three bits, zeros up to the byte boundary, four bytes
+/// and at most 65535 bytes of input as they are; a longer input takes
+/// several.  Returns the new bit position.
+pub(crate) unsafe fn stored_at(inp: &[u8], out: *mut u8, cap: usize, mut bitpos: usize, last: bool) -> usize {
+    let mut rest = inp;
+    loop {
+        let n = rest.len().min(0xFFFF);
+        // BFINAL and BTYPE = 0.  The bytes after the one they go into are
+        // written as zeros, which is the padding.
+        let fin = last && n == rest.len();
+        let o = append_bits(out, cap, bitpos, fin as u32, 3).div_ceil(8);
+        debug_assert!(o + 4 + n <= cap);
+        ptr::copy_nonoverlapping((n as u16).to_le_bytes().as_ptr(), out.add(o), 2);
+        ptr::copy_nonoverlapping((!(n as u16)).to_le_bytes().as_ptr(), out.add(o + 2), 2);
+        ptr::copy_nonoverlapping(rest.as_ptr(), out.add(o + 4), n);
+        bitpos = 8 * (o + 4 + n);
+        rest = &rest[n..];
+        if rest.is_empty() {
+            return bitpos;
+        }
+    }
 }
 
 /// Appends `n` bits (at most 24) at bit `bitpos` of `out`, whose byte there

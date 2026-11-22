@@ -35,8 +35,26 @@ pub(crate) fn make_lens(freqs: &[u32], lens: &mut [u8], max_bits: usize) {
         lens[(sym == 0) as usize] = 1;
         return;
     }
+    // Sorted: a counting sort on the count, with every count from 255 up in
+    // one last bucket, which is then sorted on its own.  Within a bucket the
+    // symbols stay in the order they were met, which is symbol order.
+    let unsorted = key;
+    let mut key = [0u32; NUM_LL];
+    let mut start = [0u16; 257];
+    for &x in &unsorted[..k] {
+        start[1 + ((x >> 9) as usize).min(255)] += 1;
+    }
+    for b in 1..257 {
+        start[b] += start[b - 1];
+    }
+    let tail = start[255] as usize;
+    for &x in &unsorted[..k] {
+        let b = ((x >> 9) as usize).min(255);
+        key[start[b] as usize] = x;
+        start[b] += 1;
+    }
     let key = &mut key[..k];
-    key.sort_unstable();
+    key[tail..].sort_unstable();
 
     // In place: a[] holds counts, then the parent of each internal node,
     // then the depth of each internal node, then the depth of each leaf.

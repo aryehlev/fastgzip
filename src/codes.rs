@@ -18,6 +18,29 @@ pub(crate) const LEN_VALUE_MASK: u32 = (1 << 19) - 1;
 pub(crate) const LEN_NBITS_SHIFT: u32 = 19;
 pub(crate) const LEN_SLOT_SHIFT: u32 = 24;
 
+/// The bits of `x` in reverse order.  A table for the low and the high byte:
+/// the processor has an instruction for this on arm64 only.
+#[inline(always)]
+fn rev16(x: u16) -> u16 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        x.reverse_bits()
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        static REV8: [u8; 256] = {
+            let mut t = [0u8; 256];
+            let mut i = 0;
+            while i < 256 {
+                t[i] = (i as u8).reverse_bits();
+                i += 1;
+            }
+            t
+        };
+        (REV8[(x & 0xFF) as usize] as u16) << 8 | REV8[(x >> 8) as usize] as u16
+    }
+}
+
 /// Each table is indexed by what the encoder has in hand (a byte, a match
 /// length, an offset slot) and gives everything to be written for it in one
 /// 32-bit load.  libdeflate keeps codewords and lengths in separate arrays,
@@ -49,6 +72,71 @@ impl Codes {
         make_lens(&f_off[..USED_OFF], &mut self.off_lens[..USED_OFF], MAX_OFF_BITS);
         self.write_header();
         self.fill();
+    }
+
+    /// Codes for the symbol counts of one block, which is then written with
+    /// them: the same code lengths and header as `build`, but table entries
+    /// only for symbols that have a codeword.  The others keep whatever they
+    /// held, and nothing reads them: every symbol of the block has a count.
+    pub(crate) fn build_own(&mut self, f_ll: &[u32; NUM_LL], f_off: &[u32; NUM_OFF]) {
+        make_lens(&f_ll[..USED_LL], &mut self.ll_lens[..USED_LL], MAX_LL_BITS);
+        make_lens(&f_off[..USED_OFF], &mut self.off_lens[..USED_OFF], MAX_OFF_BITS);
+        self.write_header();
+        self.fill_used();
+    }
+
+    fn fill_used(&mut self) {
+        // The first codeword of each length, as in `codewords`.  A symbol
+        // without a codeword counts under length 0 and gets "no bits".
+        fn first(lens: &[u8]) -> [u16; 16] {
+            let mut count = [0u16; 16];
+            for &l in lens {
+                count[(l & 15) as usize] += 1;
+            }
+            count[0] = 0;
+            let mut next = [0u16; 16];
+            let mut code = 0u16;
+            for bits in 1..16 {
+                code = (code + count[bits - 1]) << 1;
+                next[bits] = code;
+            }
+            next
+        }
+        // The next codeword of length `l`, bits reversed, | l << 16.
+        #[inline(always)]
+        fn take(next: &mut [u16; 16], l: u8) -> u32 {
+            let l = (l & 15) as usize;
+            let code = next[l];
+            next[l] = code.wrapping_add(1);
+            (rev16(code) as u32) >> (16 - l) | (l as u32) << 16
+        }
+        let mut next = first(&self.ll_lens[..USED_LL]);
+        for b in 0..256 {
+            self.lit[b] = take(&mut next, self.ll_lens[b]);
+        }
+        self.eob = take(&mut next, self.ll_lens[EOB]);
+        for slot in 0..NUM_LEN {
+            let l = self.ll_lens[FIRST_LEN + slot];
+            let e = take(&mut next, l);
+            if l == 0 {
+                continue;
+            }
+            let (cw, l) = (e & 0xFFFF, l as u32);
+            let extra_bits = LEN_EXTRA[slot] as u32;
+            let base = LEN_BASE[slot] as usize;
+            // 258 is a symbol of its own, not the last length of the one
+            // before it.
+            let count = if slot == NUM_LEN - 2 { 31 } else { 1usize << extra_bits };
+            for extra in 0..count {
+                self.len[base + extra] = (cw | (extra as u32) << l)
+                    | (l + extra_bits) << LEN_NBITS_SHIFT
+                    | (slot as u32) << LEN_SLOT_SHIFT;
+            }
+        }
+        let mut next = first(&self.off_lens[..USED_OFF]);
+        for s in 0..USED_OFF {
+            self.off[s] = take(&mut next, self.off_lens[s]);
+        }
     }
 
     /// `lit`, `len`, `eob` and `off` from `ll_lens` and `off_lens`.
@@ -178,26 +266,29 @@ impl Codes {
 struct HeaderBits<'a> {
     out: &'a mut [u8; HDR_BYTES],
     bytes: usize,
-    buf: u32,
+    buf: u64,
     n: u32,
 }
 
 impl HeaderBits<'_> {
+    /// Appends the low `n` bits of `bits` (at most 16, and nothing above
+    /// them).  Whole groups of four bytes are written as they fill up.
+    #[inline(always)]
     fn put(&mut self, bits: u32, n: u32) {
-        self.buf |= bits << self.n;
+        self.buf |= (bits as u64) << self.n;
         self.n += n;
-        while self.n >= 8 {
-            self.out[self.bytes] = self.buf as u8;
-            self.bytes += 1;
-            self.buf >>= 8;
-            self.n -= 8;
+        if self.n >= 32 {
+            self.out[self.bytes..self.bytes + 4].copy_from_slice(&(self.buf as u32).to_le_bytes());
+            self.bytes += 4;
+            self.buf >>= 32;
+            self.n -= 32;
         }
     }
 
-    /// The number of bits written.  The last byte is written even when it
-    /// holds no bit, so that it can always be read.
+    /// The number of bits written.  The byte after the last whole one is
+    /// written even when it holds no bit, so that it can always be read.
     fn finish(self) -> u32 {
-        self.out[self.bytes] = self.buf as u8;
+        self.out[self.bytes..self.bytes + 4].copy_from_slice(&(self.buf as u32).to_le_bytes());
         self.bytes as u32 * 8 + self.n
     }
 }
